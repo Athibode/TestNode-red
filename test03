@@ -1,0 +1,120 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>   // ต้องมีบรรทัดนี้สำหรับ TLS
+#include <PubSubClient.h>
+#include <ESP32Servo.h>
+
+// WiFi
+const char* ssid = "11111111";
+const char* password = "11111111";
+
+// MQTT HiveMQ
+const char* mqtt_server = "8df4daee0ae8481a8b0539623beb8aa0.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883;
+const char* mqtt_user = "hivemq.webclient.1748266348527";
+const char* mqtt_password = "x1.r6SB9@g&a?7INGpXz";
+
+// MQTT Topics
+const char* topic_distance = "iot/distance";
+const char* topic_servo = "iot/servo";
+const char* topic_buzzer = "iot/buzzer";
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+// Hardware Pins
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+#define BUZZER_PIN 15
+#define SERVO_PIN 21
+
+Servo myServo;
+// ON IN NODE-RED
+bool buzzerState = false;
+long lastServoMove = 0;
+int angle = 0;
+bool increasing = true;
+
+void setup_wifi() {
+  delay(10);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    if (client.connect("ESP32Client", mqtt_user, mqtt_password)) {
+      client.subscribe(topic_buzzer);
+    } else {
+      delay(2000);
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (int i = 0; i < length; i++) msg += (char)payload[i];
+
+  if (String(topic) == topic_buzzer) {
+    buzzerState = (msg == "on");
+    digitalWrite(BUZZER_PIN, buzzerState ? HIGH : LOW);
+  }
+}
+
+long readDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  return duration * 0.034 / 2;
+}
+// Setup fo fungtion
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  myServo.attach(SERVO_PIN);
+
+  setup_wifi();
+  espClient.setInsecure(); // skip certificate validation
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+}
+// loop for module
+void loop() {
+  if (!client.connected()) reconnect();
+  client.loop();
+
+  long distance = readDistanceCM();
+  client.publish(topic_distance, String(distance).c_str());
+
+  if (distance <= 30) {
+    if (!buzzerState) {
+      buzzerState = true;
+      digitalWrite(BUZZER_PIN, HIGH);
+      client.publish(topic_buzzer, "on");
+    }
+    // Don't move servo
+  } else {
+    if (buzzerState) {
+      buzzerState = false;
+      digitalWrite(BUZZER_PIN, LOW);
+      client.publish(topic_buzzer, "off");
+    }
+    // Move servo slowly every 20ms
+    if (millis() - lastServoMove > 20) {
+      lastServoMove = millis();
+      if (increasing) angle += 1;
+      else angle -= 1;
+
+      if (angle >= 180) increasing = false;
+      if (angle <= 0) increasing = true;
+
+      myServo.write(angle);
+      client.publish(topic_servo, String(angle).c_str());
+    }
+  }
+
+  delay(100);
+}
